@@ -1,0 +1,395 @@
+---
+title: "Toxoplasmosis at AIDS diagnosis"
+author: "Xuan Fang"
+date: "04/2020"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(s20x)
+library(MASS)
+library(MuMIn)
+library(statmod)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(crossval)
+library(hexbin)
+library(reshape2)
+library(GGally)
+library(mgcv)
+library(vioplot)
+library(pROC)
+library(gridExtra)
+library(tibble)
+```
+
+
+# Background
+The file `aidsQuebec1979-1994.RData` contains de-identified information about individual diagnoses (Dx) of Acquired Immunodeficiency Syndrome (AIDS) among adults ≥15 years of age in Québec between 1979, when the first case was identified, and 1994. Amongst the information is date of diagnosis, expressed in years with decimals (`DxDate`); the age of the individual at diagnosis (`DxAge`); the risk category of the individual as it was recorded at the time (`RiskCat`); and an indicator for toxoplasmosis as a diagnostic disease for AIDS. These diagnostic diseases, numbering 23 at the time, were used to identify the individual as having AIDS after a period of HIV seropositivity.
+
+The risk category is specified as follows:
+
+Value   | Description
+:---    |:---  
+MSM     | Men who have sex with men (MSM)
+IDU     | Injection drug users (IDU)
+MSM/IDU | Both MSM and IDU
+HEM     | People with haemophilia
+HPR     | People with a heterosexual partner at risk
+HEC     | People from HIV-endemic countries
+TRN     | People infected through transfusion
+
+Among the diagnostic diseases of AIDS is toxoplasmosis (indicator `TOXO`), caused by a common microscopic parasite, which is usually asymptomatic in people with uncompromised immune systems. In AIDS patients, however, it can cause severe symptoms, including confusion, seizures, inflammation of the retina and a pneumonia-like lung condition.
+We consider the effect of age separately in each risk category (through an interaction) on the probability of toxoplasmosis, adjusting for the number of years since the first AIDS diagnosis in Québec.
+
+We aim to fit appropriate generalised multivariable linear model by maximum likelihood and point estimates and 95% confidence intervals for the odds ratio, the relative risk and the risk difference for the following comparisons:
+
+a) between the ages of 30 and 50 among people with AIDS from HIV-endemic countries
+b) between people with AIDS from HIV-endemic countries and people with AIDS with a heterosexual partner at risk at the age of 30.
+
+
+# Load datasets and examaine the data 
+```{r}
+load("aidsQuebec1979-1994.RData")
+```
+
+
+```{r}
+str(aids) 
+```
+
+```{r}
+summary(aids)
+```
+
+create a new variable `years_since` in order to make sure that the intercept corresponds to the earliest date of diagnosis.
+```{r}
+aids$years_since <- aids$DxDate-min(aids$DxDate)
+```
+
+```{r}
+head(aids, 10)
+# TOTO: Yes=1 and No=0   
+# MSM: 	Men who have sex with men (MSM)
+# HEM:	People with haemophilia
+# HPR:	People with a heterosexual partner at risk
+# IDU:	Injection drug users (IDU)
+# MSM/IDU: 	Both MSM and IDU
+# HEC:  People from HIV-endemic countries 
+# TRN:	People infected through transfusion
+```
+
+
+# Pre-analysis exploratory
+## Proportion with toxoplasmosis against age at diagnosis by risk category
+```{r}
+aids %>%
+  ggplot(aes(x = DxAge, y = TOXO, fill = RiskCat, colour = RiskCat)) +
+  geom_smooth(method = "gam", formula = y~s(x, bs = "cs")) +
+  coord_cartesian(ylim=c(0,NA)) +
+  labs(x = "Age at diagnosis (years)", 
+       y = "Proportion with toxoplasmosis as diagnostic disease", 
+       title = "Figure 1. Proportion with toxoplasmosis against age at diagnosis") +
+  facet_wrap(vars(RiskCat)) + theme(legend.position="none", plot.title = element_text(hjust = 0.5))
+```
+
+
+## Distribution of age at diagnosis by risk category
+```{r}
+aids %>%
+  ggplot(aes(x = RiskCat, y = DxAge))+
+  geom_violin(fill = "blue", colour = "blue", alpha = 0.3) +
+  labs(x = "Risk category",
+       y = "Age at diagnosis",
+       title = "Figure 2. Distibution of age at diagnosis by risk category") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure 1 indicates that risk category and age at diagnosis interact in their effect on probability of toxoplasmosis since there are different slopes for each type of risk.
+
+Figure 2 provides evidence of disparities in age distribution between some risk categories, which suggests adjusting for risk category as a confounder and modelling the effect of age at diagnosis in interaction with risk category. As Figure 1 shown, we expect decreasing probabilities with age in risk categories HEM and HEC, while increasing probabilities in MSM and HPR.
+
+
+## Proportion with toxoplasmosis as diagnostic disease against date of diagnosis
+```{r}
+aids %>%
+  ggplot(aes(x = DxDate, y = TOXO))+
+  geom_smooth(method = "gam", formula = y~s(x, bs = "cs")) +
+  coord_cartesian(ylim=c(0,NA)) +
+  labs(x = "Date of Diagnosis",
+       y = "Proportion with toxoplasmosis as diagnostic disease",
+       title = "Figure 3. Distibution of age at diagnosis by risk category") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure 3 shows that the probability of toxoplasmosis as a diagnostic disease changes over time. 
+
+
+## Age at diagnosis against date of diagnosis
+```{r}
+### Hexagonal heatmap 
+aids %>% 
+  ggplot(aes(x = DxDate, y = DxAge)) +
+  geom_hex()+ 
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  labs(x = "Date of Diagnosis",
+       y = "Age at diagnosis",
+       title = "Figure 4. Age at diagnosis against date of diagnosis") +
+  theme(plot.title = element_text(hjust = 0.5))
+  
+```
+
+Figure 4 shows the age of diagnosis with a slight increase in age over the years, which suggests adjusting for the date of diagnosis seems warranted as a confounder or efficiency-enhancing covariate.
+
+
+# Fit the models and calculate estimates with CI.
+
+## Part One: Odds ratio
+```{r}
+# Odds ratio
+aids.mod1 <- glm(TOXO ~ DxAge*RiskCat + years_since, data = aids, family = binomial(link = "logit"))
+summary(aids.mod1)
+# The deviance does not suggest evidence of lack-of-fit
+1 - pchisq(aids.mod1$deviance, aids.mod1$df.residual)
+```
+
+### Odds Ratio (a)
+Produce point estimates and 95% confidence intervals for the odds ratio: (a) between the ages of 30 and 50 among people with AIDS from HIV-endemic countries (HEC):
+```{r}
+# 1(a) - Point estimate and 95% confidence intervals for the Odds Ratio
+# Point estimate of Odds Ratio of Age 30 vs Age 50 given HEC
+# Diff of DxAge = 30 - 50 = -20 and 
+# Diff of DxAge:RiskCatHEC = (30-50)*1 = -20
+co.mod1 <- coef(aids.mod1)
+contrast.vector <- rep(0, length(co.mod1))
+names(contrast.vector) <- names(co.mod1)
+contrast.vector[c("DxAge","DxAge:RiskCatHEC")] <- c(-20, -20)
+# Estimate
+contrast.est1 <- sum(contrast.vector*co.mod1)
+OR.a <-exp(contrast.est1)
+names(OR.a) <- c("Point Estimate")
+OR.a # Odds Ratio
+
+# Variance & Standard error
+contrast.var.est1 <- t(contrast.vector)%*%vcov(aids.mod1)%*%(contrast.vector)
+contrast.se.est1 <- sqrt(contrast.var.est1)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower1 <- contrast.est1+qnorm(0.025)*contrast.se.est1
+contrast.CI.upper1 <- contrast.est1+qnorm(1-0.025)*contrast.se.est1
+contrast.CI1 <- c(exp(contrast.CI.lower1), exp(contrast.CI.upper1))
+names(contrast.CI1) <- c("Lower","Upper")
+contrast.CI1
+```
+
+#### Commentary:
+We estimate that, the odds of having toxoplasmosis as an AIDS diagnostic disease, on average, 1.34 times higher for people from an HIV-endemic country at the age of 30 than those at the age of 50. 
+
+The 95% confidence interval for the ratio of odds is 0.71 to 2.55. We estimate that, in the HEC risk category, the odds of having toxoplasmosis as a diagnostic disease for a 30-year-old are between 0.71 and 2.55 times the odds of a 50-year-old.
+
+### Odds Ratio (b)
+Produce point estimates and 95% confidence intervals for the odds ratio: (b) between people with AIDS from HIV-endemic countries (HEC) and people with AIDS with a heterosexual partner at risk (HPR) at the age of 30:
+```{r}
+# 1(b) - Point estimate and 95% confidence intervals for the Odds Ratio
+# Point estimate of Odds Ratio of HEC vs HPR given age 30
+# Diff of DxAge = 0 and
+# DxAge = 30
+contrast.vector2 <- rep(0, length(co.mod1))
+names(contrast.vector2) <- names(co.mod1)
+contrast.vector2[c("RiskCatHEC","DxAge:RiskCatHEC","RiskCatHPR","DxAge:RiskCatHPR")] <- c(1,30,-1,-30)
+# Estimate
+contrast.est2 <- sum(contrast.vector2*co.mod1)
+OR.b <-exp(contrast.est2)
+names(OR.b) <- c("Point Estimate")
+OR.b  # Odds Ratio
+
+# Variance & Standard error
+contrast.var.est2 <- t(contrast.vector2)%*%vcov(aids.mod1)%*%(contrast.vector2)
+contrast.se.est2 <- sqrt(contrast.var.est2)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower2 <- contrast.est2+qnorm(0.025)*contrast.se.est2
+contrast.CI.upper2 <- contrast.est2+qnorm(1-0.025)*contrast.se.est2
+contrast.CI2 <- c(exp(contrast.CI.lower2), exp(contrast.CI.upper2))
+names(contrast.CI2) <- c("Lower","Upper")
+contrast.CI2
+```
+
+#### Commentary:
+We estimate that, the odds of having toxoplasmosis as an AIDS diagnostic disease, on average, about 8 times higher for people at the age of 30 from HIV-endemic countries than those at the age of 30 with a heterosexual partner at risk. 
+
+The 95% confidence interval for the ratio of odds is 2.33 to 27.39. We estimate that, in the age of 30, the odds of having toxoplasmosis as a diagnostic disease for people from HIV-endemic countries are between 2.33 and 27.39 times the odds of who with a heterosexual partner at risk .
+
+
+## Part Two: Relative Risk
+```{r}
+# Relative risk model
+aids.mod2 <- glm(TOXO ~ DxAge*RiskCat + years_since, data = aids, family = binomial(log))
+summary(aids.mod2)
+```
+
+### Relative Risk (a)
+Produce point estimates and 95% confidence intervals for the relative risk: (a) between the ages of 30 and 50 among people with AIDS from HIV-endemic countries (HPR):
+```{r}
+# 1(a) - Point estimate and 95% confidence intervals for the relative risk
+# Point estimate of relative risk  of Age 30 vs Age 50 given HEC
+# Diff of DxAge = 30 - 50 = -20 and 
+# Diff of DxAge:RiskCatHEC = (30-50)*1 = -20
+co.mod2 <- coef(aids.mod2)
+contrast.vector3 <- rep(0, length(co.mod2))
+names(contrast.vector3) <- names(co.mod2)
+contrast.vector3[c("DxAge","DxAge:RiskCatHEC")] <- c(-20, -20)
+# Estimate
+contrast.est3 <- sum(contrast.vector3*co.mod2)
+RR.a <-exp(contrast.est3)
+names(RR.a) <- c("Point Estimate")
+RR.a # Relative Risk
+
+# Variance & Standard error
+contrast.var.est3 <- t(contrast.vector3)%*%vcov(aids.mod2)%*%(contrast.vector3)
+contrast.se.est3 <- sqrt(contrast.var.est3)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower3 <- contrast.est3+qnorm(0.025)*contrast.se.est3
+contrast.CI.upper3 <- contrast.est3+qnorm(1-0.025)*contrast.se.est3
+contrast.CI3 <- c(exp(contrast.CI.lower3), exp(contrast.CI.upper3))
+names(contrast.CI3) <- c("Lower","Upper")
+contrast.CI3
+```
+
+#### Commentary:
+We estimate that, the risk of having toxoplasmosis as an AIDS diagnostic disease, on average, 1.28 times higher for people from an HIV-endemic country at the age of 30 than those at the age of 50. 
+
+The 95% confidence interval for the relative risk is 0.76 to 2.14. We estimate that, in the HEC risk category, the risk of having toxoplasmosis as a diagnostic disease for a 30-year-old are between 0.76 and 2.14 times the risk of a 50-year-old.
+
+### Relative Risk (b)
+Produce point estimates and 95% confidence intervals for the odds ratio: (b) between people with AIDS from HIV-endemic countries (HEC) and people with AIDS with a heterosexual partner at risk (HPR) at the age of 30:
+```{r}
+# 1(b) - Point estimates and 95% confidence intervals for the relative risk
+# Point estimate of relative risk of HEC vs HPR given age 30
+# Diff of DxAge = 0 
+# and DxAge = 30
+contrast.vector4 <- rep(0, length(co.mod2))
+names(contrast.vector4) <- names(co.mod2)
+contrast.vector4[c("RiskCatHEC","DxAge:RiskCatHEC","RiskCatHPR","DxAge:RiskCatHPR")] <- c(1,30,-1,-30)
+# Estimate
+contrast.est4 <- sum(contrast.vector4*co.mod2)
+RR.b <-exp(contrast.est4)
+names(RR.b) <- c("Point Estimate")
+RR.b  # Odds Ratio
+
+# Variance & Standard error
+contrast.var.est4 <- t(contrast.vector4)%*%vcov(aids.mod2)%*%(contrast.vector4)
+contrast.se.est4 <- sqrt(contrast.var.est4)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower4 <- contrast.est4+qnorm(0.025)*contrast.se.est4
+contrast.CI.upper4 <- contrast.est4+qnorm(1-0.025)*contrast.se.est4
+contrast.CI4 <- c(exp(contrast.CI.lower4), exp(contrast.CI.upper4))
+names(contrast.CI4) <- c("Lower","Upper")
+contrast.CI4
+```
+
+#### Commentary:
+We estimate that, the risk of having toxoplasmosis as an AIDS diagnostic disease, on average, about 6.2 times higher for people at the age of 30 from HIV-endemic countries than those at the age of 30 with a heterosexual partner at risk. 
+
+The 95% confidence interval for the relative risk is 1.97 to 19.46. We estimate that, in the age of 30, the odds of having toxoplasmosis as a diagnostic disease for people from HIV-endemic countries are between 1.97 and 19.46 times the odds of who with a heterosexual partner at risk .
+
+
+## Part Three: Risk Difference
+```{r, warning=FALSE}
+# Model formula
+formula.mod3 <- TOXO ~ DxAge*RiskCat+years_since
+# Number of covariates in the formula, including intercept
+rank.mm <- ncol(model.matrix(formula.mod3, data=aids))
+# Starting vector
+start.vec <- c(mean(aids$TOXO, na.rm=T), rep(0,rank.mm-3)) #since we have 1 intercept & 2 reference levels
+# Fit the model
+aids.mod3 <- glm(formula.mod3, data=aids, family=binomial(link="identity"), start=start.vec, control=glm.control(maxit = 100))
+summary(aids.mod3)
+```
+
+### Risk Difference (a)
+Produce point estimates and 95% confidence intervals for the risk difference: (a) between the ages of 30 and 50 among people with AIDS from HIV-endemic countries (HEC):
+```{r}
+# 1(a) - Point estimate and 95% confidence intervals for the risk difference
+# Point estimate of risk difference of Age 30 vs Age 50 given HEC
+# Diff of DxAge = 30 - 50 = -20 and 
+# Diff of DxAge:RiskCatHEC = (30-50)*1 = -20
+co.mod3 <- coef(aids.mod3)
+contrast.vector5 <- rep(0, length(co.mod3))
+names(contrast.vector5) <- names(co.mod3)
+contrast.vector5[c("DxAge","DxAge:RiskCatHEC")] <- c(-20, -20)
+# Estimate
+contrast.est5 <- sum(contrast.vector5*co.mod3)
+RD.a <- contrast.est5
+names(RD.a) <- c("Point Estimate")
+RD.a # Risk difference
+
+# Variance & Standard error
+contrast.var.est5 <- t(contrast.vector5)%*%vcov(aids.mod3)%*%(contrast.vector5)
+contrast.se.est5 <- sqrt(contrast.var.est5)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower5 <- contrast.est5+qnorm(0.025)*contrast.se.est5
+contrast.CI.upper5 <- contrast.est5+qnorm(1-0.025)*contrast.se.est5
+contrast.CI5 <- c(contrast.CI.lower5, contrast.CI.upper5)
+names(contrast.CI5) <- c("Lower","Upper")
+contrast.CI5
+```
+
+#### Commentary:
+We estimate that, in the the HEC risk category, the risk difference of having toxoplasmosis as an AIDS diagnostic disease between people from an HIV-endemic country at the age of 30 and those at the age of 50, on average is 5.48%
+
+The 95% confidence interval for the risk difference is -3.62% to 14.58%. We estimate that, in the the HEC risk category, risk difference of having toxoplasmosis as an AIDS diagnostic disease between people from an HIV-endemic country at the age of 30 and those at the age of 50, on average is between -3.62% and 14.58%.
+
+### Risk Difference (b)
+Produce point estimates and 95% confidence intervals for the risk difference: (b) between people with AIDS from HIV-endemic countries (HEC) and people with AIDS with a heterosexual partner at risk (HPR) at the age of 30:
+```{r}
+# 1(b) - Point estimates and 95% confidence intervals for the Odds Ratio
+# Point estimate of Odds Ratio of HEC vs HPR given age 30
+# Diff of DxAge = 0 
+# and DxAge = 30
+contrast.vector6 <- rep(0, length(co.mod3))
+names(contrast.vector6) <- names(co.mod3)
+contrast.vector6[c("RiskCatHEC","DxAge:RiskCatHEC","RiskCatHPR","DxAge:RiskCatHPR")] <- c(1,30,-1,-30)
+# Estimate
+contrast.est6 <- sum(contrast.vector6*co.mod3)
+RD.b <-contrast.est6
+names(RD.b) <- c("Point Estimate")
+RD.b  # Relative risk
+
+# Variance & Standard error
+contrast.var.est6 <- t(contrast.vector6)%*%vcov(aids.mod3)%*%(contrast.vector6)
+contrast.se.est6 <- sqrt(contrast.var.est6)
+# Ward CI and exponetiate its bounds
+contrast.CI.lower6 <- contrast.est6+qnorm(0.025)*contrast.se.est6
+contrast.CI.upper6 <- contrast.est6+qnorm(1-0.025)*contrast.se.est6
+contrast.CI6 <- c(contrast.CI.lower6, contrast.CI.upper6)
+names(contrast.CI6) <- c("Lower","Upper")
+contrast.CI6
+```
+
+#### Commentary:
+We estimate that,  the risk difference of having toxoplasmosis as an AIDS diagnostic disease between people at the age of 30 from HIV-endemic countries and those at the age of 30 with a heterosexual partner at risk, on average is 20.16%. 
+
+The confidence interval for the risk difference is 11.98% to 25.16%. We estimate that, in the age of 30, the risk difference of having toxoplasmosis as an AIDS diagnostic disease between people from HIV-endemic countries and those with a heterosexual partner at risk, are between 14.07% and 26.24%.
+
+## Summary Statistics
+##### a) between the ages of 30 and 50 among people with AIDS from HIV-endemic countries
+The estimates below use the age of 50 as reference, and express the difference associated with being 30.
+
+Estimand        | Estimate               | 95% confidence interval
+:---            | :---                   | :--- 
+Odds ratio      | `r round(OR.a,2)`      | (`r round(contrast.CI1[1],2)`, `r round(contrast.CI1[2],2)`)
+Relative risk   | `r round(RR.a,2)`      | (`r round(contrast.CI3[1],2)`, `r round(contrast.CI3[2],2)`)
+Risk difference | `r round(RD.a,2)`      | (`r round(contrast.CI5[1],2)`, `r round(contrast.CI3[2],2)`)
+
+
+##### b) between people with AIDS from HIV-endemic countries and people with AIDS with a heterosexual partner at risk at the age of 30
+The estimates below use the “people with a heterosexual partner at risk” as reference, and express the difference associated with person from HIV-endemic country.
+
+Estimand        | Estimate               | 95% confidence interval
+:---            | :---                   | :--- 
+Odds ratio      | `r round(OR.b,2)`      | (`r round(contrast.CI2[1],2)`, `r round(contrast.CI2[2],2)`)
+Relative risk   | `r round(RR.b,2)`      | (`r round(contrast.CI4[1],2)`, `r round(contrast.CI4[2],2)`)
+Risk difference | `r round(RD.b,2)`      | (`r round(contrast.CI6[1],2)`, `r round(contrast.CI6[2],2)`)
