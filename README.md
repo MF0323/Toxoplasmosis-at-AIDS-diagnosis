@@ -20,6 +20,8 @@ The risk category is specified as follows:
 
 Among the diagnostic diseases of AIDS is toxoplasmosis (indicator TOXO), caused by a common microscopic parasite, which is usually asymptomatic in people with uncompromised immune systems. In AIDS patients, however, it can cause severe symptoms, including confusion, seizures, inflammation of the retina and a pneumonia-like lung condition. We consider the effect of age separately in each risk category (through an interaction) on the probability of toxoplasmosis, adjusting for the number of years since the first AIDS diagnosis in Québec.
 
+## Our Tasks
+
 We aim to fit appropriate generalised multivariable linear model by maximum likelihood and point estimates and 95% confidence intervals for the **odds ratio**, the **relative risk** and the **risk difference** for the following comparisons:
 
 a. between the ages of **30** and **50** among people with AIDS from **HIV-endemic countries**
